@@ -164,6 +164,10 @@ static void load_input_file_module(struct df_arg_desc *df_arg)
 				sr_session_destroy(session);
 				return;
 			}
+			if (opt_transform_module) {
+				if (!setup_transform_module(sdi))
+					g_critical("Failed to initialize transform module.");
+			}
 			got_sdi = TRUE;
 		}
 	}
@@ -207,6 +211,10 @@ void load_input_file(gboolean do_props)
 			if (select_channels(sdi) != SR_OK) {
 				sr_session_destroy(session);
 				return;
+			}
+			if (opt_transform_module) {
+				if (!setup_transform_module(sdi))
+					g_critical("Failed to initialize transform module.");
 			}
 			main_loop = g_main_loop_new(NULL, FALSE);
 

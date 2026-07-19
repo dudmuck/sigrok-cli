@@ -79,6 +79,7 @@ void datafeed_in(const struct sr_dev_inst *sdi,
 int opt_to_gvar(char *key, char *value, struct sr_config *src);
 int set_dev_options_array(struct sr_dev_inst *sdi, char **opts);
 int set_dev_options(struct sr_dev_inst *sdi, GHashTable *args);
+const struct sr_transform *setup_transform_module(const struct sr_dev_inst *sdi);
 void run_session(void);
 
 /* input.c */
