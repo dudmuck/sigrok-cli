@@ -33,6 +33,7 @@ sigrok_cli_SOURCES = \
 	output.c \
 	decode.c \
 	sigrok-cli.h \
+	capture_io.h \
 	parsers.c \
 	anykey.c \
 	options.c
@@ -48,6 +49,8 @@ hicolor_icondir = @datadir@/icons/hicolor/scalable/apps
 hicolor_icon_DATA = contrib/sigrok-cli.svg
 
 EXTRA_DIST = \
+	tests/capture_io_faults.c \
+	tests/capture_status_file_faults.c \
 	contrib/sigrok-logo-notext.ico \
 	contrib/org.sigrok.sigrok-cli.desktop \
 	contrib/sigrok-cli.svg
@@ -59,4 +62,3 @@ ChangeLog:
 	git --git-dir '$(top_srcdir)/.git' log >$@ || touch $@
 
 dist-hook: ChangeLog
-

@@ -20,12 +20,143 @@
 #include <config.h>
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include "capture_io.h"
 #include "sigrok-cli.h"
 
 static uint64_t limit_samples = 0;
 static uint64_t limit_frames = 0;
+
+/* Output callbacks are void, so their failures cannot flow through
+ * sr_session_send(). Keep CLI and driver errors separately until after END. */
+static struct {
+	struct sr_saleae_capture_status driver;
+	struct capture_output_result output;
+	uint64_t samples;
+	int started, ended, driver_known, output_closed, internal_io, saleae_requested, reported;
+	guint stop_source_id;
+} capture_io;
+
+static gboolean capture_stop_idle(gpointer data)
+{
+	capture_io.stop_source_id = 0;
+	sr_session_stop(data);
+	return G_SOURCE_REMOVE;
+}
+
+static void capture_request_stop_on_error(const char *stage, int code,
+		struct sr_session *session, gboolean ending)
+{
+	if (!capture_io.saleae_requested)
+		return;
+	capture_output_error(&capture_io.output, stage, code);
+	if (!ending && session && !capture_io.stop_source_id)
+		capture_io.stop_source_id = g_idle_add(capture_stop_idle, session);
+}
+
+int capture_status_report(void)
+{
+	const char *outcome, *stage, *reason;
+	int code, printed, fd = -1, dirfd, failed = 0;
+	FILE *destination = stderr;
+	char *directory;
+	const struct sr_saleae_capture_status *d = &capture_io.driver;
+	if (!capture_io.saleae_requested || !opt_capture_status_file || capture_io.reported)
+		return 0;
+	capture_io.reported = 1;
+	if (opt_capture_status_file) {
+		fd = open(opt_capture_status_file, O_WRONLY | O_CREAT | O_EXCL, 0600);
+		if (fd < 0)
+			return 2;
+		if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
+			close(fd);
+			return 2;
+		}
+		destination = fdopen(fd, "w");
+		if (!destination) {
+			close(fd);
+			return 2;
+		}
+	}
+
+	if (capture_io.output.first_stage || d->first_stage || d->usb_errors ||
+			d->submit_errors || d->session_errors || d->stop_errors)
+		outcome = "LOSS";
+	else if (!capture_io.started || !capture_io.ended || !capture_io.driver_known ||
+		!d->stop_completed || capture_io.internal_io || !capture_io.output_closed)
+		outcome = "UNKNOWN";
+	else
+		outcome = "OK";
+	if (capture_io.output.first_stage && d->first_stage)
+		stage = "multiple";
+	else if (capture_io.output.first_stage)
+		stage = capture_io.output.first_stage;
+	else if (d->first_stage)
+		stage = d->first_stage;
+	else if (capture_io.internal_io)
+		stage = "unsupported_internal_io";
+	else if (!capture_io.driver_known)
+		stage = "driver_status_unavailable";
+	else if (!capture_io.started)
+		stage = "not_started";
+	else if (!capture_io.ended)
+		stage = "missing_end";
+	else
+		stage = "none";
+	code = capture_io.output.first_stage && d->first_stage ? 0 :
+		(capture_io.output.first_stage ? capture_io.output.first_code : d->first_code);
+	reason = capture_io.output.first_stage && d->first_stage ? "multiple_errors" :
+		(capture_io.output.first_stage ? "output_error" :
+		 (d->first_stage ? "driver_error" : "requested_or_limit"));
+	printed = fprintf(destination,
+		"SIGROK_CAPTURE_STATUS schema=1 outcome=%s first_stage=%s first_code=%d "
+		"driver_first_stage=%s driver_first_code=%d output_first_stage=%s output_first_code=%d "
+		"stop_reason=%s stop_requested=%d stop_completed=%d "
+		"completed=%" PRIu64 " timed_out=%" PRIu64 " cancelled=%" PRIu64
+		" short=%" PRIu64 " usb_bytes=%" PRIu64 " usb_errors=%" PRIu64
+		" usb_no_device=%" PRIu64 " usb_unexpected_cancel=%" PRIu64
+		" usb_stall=%" PRIu64 " usb_overflow=%" PRIu64
+		" usb_partial_word=%" PRIu64
+		" submit_errors=%" PRIu64 " session_errors=%" PRIu64 " stop_errors=%" PRIu64
+		" samples=%" PRIu64 " output_attempted=%" PRIu64 " output_written=%" PRIu64
+		" output_committed=%" PRIu64 " encode_errors=%u write_errors=%u "
+		"flush_errors=%u close_errors=%u output_closed=%d\n",
+		outcome, stage, code, d->first_stage ? d->first_stage : "none", d->first_code,
+		capture_io.output.first_stage ? capture_io.output.first_stage : "none",
+		capture_io.output.first_code, reason, d->stop_requested, d->stop_completed,
+		d->transfers_completed, d->transfers_timed_out, d->transfers_cancelled,
+		d->transfers_short, d->bytes_received, d->usb_errors,
+		d->usb_no_device, d->usb_unexpected_cancel,
+		d->usb_stall, d->usb_overflow, d->usb_partial_word,
+		d->submit_errors, d->session_errors, d->stop_errors,
+		capture_io.samples, capture_io.output.attempted, capture_io.output.written,
+		capture_io.output.committed, capture_io.output.encode_errors,
+		capture_io.output.write_errors, capture_io.output.flush_errors,
+		capture_io.output.close_errors,
+		capture_io.output_closed);
+	if (printed < 0 || fflush(destination) != 0)
+		return 2;
+	if (fd >= 0) {
+		if (fsync(fd) != 0)
+			failed = 1;
+		if (fclose(destination) != 0)
+			failed = 1;
+		directory = g_path_get_dirname(opt_capture_status_file);
+		dirfd = open(directory, O_RDONLY);
+		if (dirfd < 0 || fsync(dirfd) != 0)
+			failed = 1;
+		if (dirfd >= 0 && close(dirfd) != 0)
+			failed = 1;
+		g_free(directory);
+		if (failed)
+			return 2;
+	}
+	return strcmp(outcome, "OK") ? 2 : 0;
+}
 
 #ifdef HAVE_SRD
 extern struct srd_session *srd_sess;
@@ -460,19 +591,36 @@ void datafeed_in(const struct sr_dev_inst *sdi,
 		break;
 	}
 
-	if (!do_props && o && !opt_pds) {
+	if (!do_props && o && !opt_pds &&
+			(!capture_io.saleae_requested || !capture_io.output.first_stage ||
+			 packet->type == SR_DF_END)) {
+		out = NULL;
 		if (sr_output_send(o, packet, &out) == SR_OK) {
 			if (oa && !out) {
 				/*
 				 * The user didn't specify an output module,
 				 * but needs to see this analog data.
 				 */
-				sr_output_send(oa, packet, &out);
+				if (sr_output_send(oa, packet, &out) != SR_OK) {
+					capture_io.output.encode_errors++;
+					capture_request_stop_on_error("analog_encode", SR_ERR, session,
+						packet->type == SR_DF_END);
+				}
 			}
-			if (outfile && out && out->len > 0) {
-				fwrite(out->str, 1, out->len, outfile);
-				fflush(outfile);
+			if (outfile && out && out->len > 0 &&
+					(!capture_io.saleae_requested || !capture_io.output.first_stage)) {
+				if (capture_output_write(&capture_io.output, outfile,
+					out->str, out->len) != 0)
+					capture_request_stop_on_error(capture_io.output.first_stage,
+						capture_io.output.first_code, session,
+						packet->type == SR_DF_END);
 			}
+			if (out)
+				g_string_free(out, TRUE);
+		} else {
+			capture_io.output.encode_errors++;
+			capture_request_stop_on_error("primary_encode", SR_ERR, session,
+				packet->type == SR_DF_END);
 			if (out)
 				g_string_free(out, TRUE);
 		}
@@ -503,8 +651,27 @@ void datafeed_in(const struct sr_dev_inst *sdi,
 			sr_output_free(oa);
 		oa = NULL;
 
-		if (outfile && outfile != stdout)
-			fclose(outfile);
+		if (outfile && outfile != stdout) {
+			if (capture_output_close(&capture_io.output, outfile) != 0) {
+				capture_request_stop_on_error(capture_io.output.first_stage,
+					capture_io.output.first_code, session, TRUE);
+			} else {
+				capture_io.output_closed = 1;
+			}
+		} else if (outfile == stdout) {
+			if (fflush(stdout) != 0) {
+				capture_io.output.flush_errors++;
+				capture_request_stop_on_error("stdout_flush", errno ? errno : EIO, session, TRUE);
+			} else {
+				capture_io.output_closed = 1;
+			}
+		} else {
+			/* Internal-I/O modules have no completion status contract here. */
+			capture_io.internal_io = 1;
+		}
+		outfile = NULL;
+		capture_io.samples = rcvd_samples_logic;
+		capture_io.ended = 1;
 
 		if (limit_samples) {
 			if (rcvd_samples_logic > 0 && rcvd_samples_logic < limit_samples)
@@ -729,6 +896,14 @@ void run_session(void)
 	struct sr_dev_driver *driver;
 	const struct sr_transform *t;
 	GMainLoop *main_loop;
+	int capture_ret;
+
+	memset(&capture_io, 0, sizeof(capture_io));
+	/* A failed explicit Saleae scan must still yield UNKNOWN, whereas an
+	 * ordinary non-Saleae capture keeps sigrok-cli's historical exit path. */
+	capture_io.saleae_requested = opt_capture_status_file && opt_drv &&
+		g_str_has_prefix(opt_drv, "saleae-logic-pro") &&
+		(opt_drv[16] == '\0' || opt_drv[16] == ':');
 
 	memset(&df_arg, 0, sizeof(df_arg));
 	df_arg.do_props = FALSE;
@@ -781,6 +956,11 @@ void run_session(void)
 	}
 
 	sdi = devices->data;
+	driver = sr_dev_inst_driver_get(sdi);
+	if (opt_capture_status_file && driver && !strcmp(driver->name, "saleae-logic-pro"))
+		capture_io.saleae_requested = 1;
+	if (opt_capture_status_file && !capture_io.saleae_requested)
+		g_critical("--capture-status-file requires the Saleae Logic Pro driver.");
 	g_slist_free(devices);
 	g_slist_free(real_devices);
 
@@ -894,16 +1074,25 @@ void run_session(void)
 		(sr_session_stopped_callback)g_main_loop_quit, main_loop);
 
 	if (sr_session_start(session) != SR_OK) {
-		g_critical("Failed to start session.");
+		g_warning("Failed to start session.");
+		capture_ret = sr_saleae_logic_pro_capture_status_get(sdi, &capture_io.driver);
+		capture_io.driver_known = capture_ret == SR_OK;
 		g_main_loop_unref(main_loop);
 		sr_session_destroy(session);
 		return;
 	}
+	capture_io.started = 1;
 
 	if (opt_continuous)
 		add_anykey(session);
 
 	g_main_loop_run(main_loop);
+	if (capture_io.stop_source_id) {
+		g_source_remove(capture_io.stop_source_id);
+		capture_io.stop_source_id = 0;
+	}
+	capture_ret = sr_saleae_logic_pro_capture_status_get(sdi, &capture_io.driver);
+	capture_io.driver_known = capture_ret == SR_OK;
 
 	if (opt_continuous)
 		clear_anykey();

@@ -30,6 +30,7 @@ gboolean opt_dont_scan = FALSE;
 gboolean opt_wait_trigger = FALSE;
 gchar *opt_input_file = NULL;
 gchar *opt_output_file = NULL;
+gchar *opt_capture_status_file = NULL;
 gchar *opt_drv = NULL;
 gchar **opt_configs = NULL;
 gchar *opt_channels = NULL;
@@ -119,6 +120,8 @@ static const GOptionEntry optargs[] = {
 			"Input format", NULL},
 	{"output-file", 'o', 0, G_OPTION_ARG_FILENAME_ARRAY, &output_file_array,
 			"Save output to file", NULL},
+	{"capture-status-file", 0, 0, G_OPTION_ARG_FILENAME, &opt_capture_status_file,
+			"Create one exclusive Saleae capture status record", "PATH"},
 	{"output-format", 'O', 0, G_OPTION_ARG_CALLBACK, &check_opt_output_format,
 			"Output format", NULL},
 	{"transform-module", 'T', 0, G_OPTION_ARG_CALLBACK, &check_opt_transform_module,

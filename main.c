@@ -43,8 +43,10 @@ static void logger(const gchar *log_domain, GLogLevelFlags log_level,
 		fflush(stderr);
 	}
 
-	if (log_level & (G_LOG_LEVEL_ERROR | G_LOG_LEVEL_CRITICAL))
+	if (log_level & (G_LOG_LEVEL_ERROR | G_LOG_LEVEL_CRITICAL)) {
+		capture_status_report();
 		exit(1);
+	}
 
 }
 
@@ -230,6 +232,7 @@ static void set_options(void)
 
 int main(int argc, char **argv)
 {
+	int capture_result = 0;
 	g_log_set_default_handler(logger, NULL);
 
 	if (parse_options(argc, argv)) {
@@ -318,8 +321,10 @@ int main(int argc, char **argv)
 		get_options();
 	else if (opt_set)
 		set_options();
-	else if (opt_samples || opt_time || opt_frames || opt_continuous)
+	else if (opt_samples || opt_time || opt_frames || opt_continuous) {
 		run_session();
+		capture_result = capture_status_report();
+	}
 	else if (opt_list_serial)
 		show_serial_ports();
 	else
@@ -336,5 +341,5 @@ done:
 	if (sr_ctx)
 		sr_exit(sr_ctx);
 
-	return 0;
+	return capture_result;
 }

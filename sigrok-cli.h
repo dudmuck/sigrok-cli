@@ -81,6 +81,7 @@ int set_dev_options_array(struct sr_dev_inst *sdi, char **opts);
 int set_dev_options(struct sr_dev_inst *sdi, GHashTable *args);
 const struct sr_transform *setup_transform_module(const struct sr_dev_inst *sdi);
 void run_session(void);
+int capture_status_report(void);
 
 /* input.c */
 void load_input_file(gboolean do_props);
@@ -132,6 +133,7 @@ extern gboolean opt_dont_scan;
 extern gboolean opt_wait_trigger;
 extern gchar *opt_input_file;
 extern gchar *opt_output_file;
+extern gchar *opt_capture_status_file;
 extern gchar *opt_drv;
 extern gchar **opt_configs;
 extern gchar *opt_channels;
